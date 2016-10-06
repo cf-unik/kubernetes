@@ -17,6 +17,8 @@ import (
 	"encoding/binary"
 	"github.com/golang/glog"
 	"sync"
+	"os"
+	"github.com/emc-advanced-dev/unik/pkg/config"
 )
 
 type Runtime struct {
@@ -24,15 +26,28 @@ type Runtime struct {
 	unikIp           string
 	ownedInstances   map[string]*types.Instance
 	instanceRestarts map[string]int
+	hubConfig        string
 	mapLock          sync.RWMutex
 }
 
 func New(simpleVer int, unikIp string) *Runtime {
+	hubUrl := os.Getenv("UNIK_HUB_URL")
+	if hubUrl == "" {
+		hubUrl = "http://hub.project-unik.io"
+		glog.V(4).Infof("unik: no UNIK_HUB_URL provided, using default %v", hubUrl)
+	}
+	hubUser := os.Getenv("UNIK_HUB_USER")
+	hubPass := os.Getenv("UNIK_HUB_PASSWORD")
 	return &Runtime{
 		version: &version{simpleVer: simpleVer},
 		unikIp: unikIp,
 		ownedInstances: make(map[string]*types.Instance),
 		instanceRestarts: make(map[string]int),
+		hubConfig: config.HubConfig{
+			URL: hubUrl,
+			Username: hubUser,
+			Password: hubUser,
+		},
 	}
 }
 
@@ -260,10 +275,17 @@ func (r *Runtime) GetPodStatus(uid kubetypes.UID, name, namespace string) (*kube
 
 // PullImage pulls an image from the network to local storage using the supplied
 // secrets if necessary.
-func (r *Runtime) PullImage(image kubecontainer.ImageSpec, pullSecrets []api.Secret) error {}
+func (r *Runtime) PullImage(image kubecontainer.ImageSpec, pullSecrets []api.Secret) error {
+	imageName, infrastructure := getImageInfo(image.Image)
+	//TODO: this may not be the format in the future, but currently works...
+	provider := strings.ToLower(infrastructure)
+	return client.UnikClient(r.unikIp).Images().Pull(r.hubConfig, imageName, provider)
+}
 
 // IsImagePresent checks whether the container image is already in the local storage.
-func (r *Runtime) IsImagePresent(image kubecontainer.ImageSpec) (bool, error) {}
+func (r *Runtime) IsImagePresent(image kubecontainer.ImageSpec) (bool, error) {
+	
+}
 
 // Gets all images currently on the machine.
 func (r *Runtime) ListImages() ([]kubecontainer.Image, error) {}
@@ -304,7 +326,7 @@ func (r *Runtime) PortForward(pod *kubecontainer.Pod, port uint16, stream io.Rea
 func (r *Runtime) runPod(pod *api.Pod) (*types.Instance, error) {
 	container := pod.Spec.Containers[0]
 	instanceName := getInstanceName(pod.Namespace, pod.Name)
-	imageName := strings.Split(container.Image, ":")[0]
+	imageName, _ := getImageInfo(container.Image)
 	//because we store the image name as Name:Infrastructure
 	mountPointsToVols := make(map[string]string)
 	for _, volumeMount := range container.VolumeMounts {
@@ -356,6 +378,14 @@ func getInstanceName(namespace, name string) string {
 
 func getImageName(imageId, infrastructure string) string {
 	return imageId + ":" + infrastructure
+}
+
+func getImageInfo(kubernetesImageName string) (string, string) {
+	split := strings.Split(kubernetesImageName, ":")
+	if len(split) != 2 {
+		panic("image format should be NAME:INFRASTRUCTURE, but have "+kubernetesImageName)
+	}
+	return split[0], split[1]
 }
 
 func toContainerState(instanceState types.InstanceState) kubecontainer.ContainerState {
