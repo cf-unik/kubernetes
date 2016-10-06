@@ -46,7 +46,7 @@ func New(simpleVer int, unikIp string) *Runtime {
 		hubConfig: config.HubConfig{
 			URL: hubUrl,
 			Username: hubUser,
-			Password: hubUser,
+			Password: hubPass,
 		},
 	}
 }
@@ -284,17 +284,36 @@ func (r *Runtime) PullImage(image kubecontainer.ImageSpec, pullSecrets []api.Sec
 
 // IsImagePresent checks whether the container image is already in the local storage.
 func (r *Runtime) IsImagePresent(image kubecontainer.ImageSpec) (bool, error) {
-	
+	imageName, _ := getImageInfo(image.Image)
+	_, err := client.UnikClient(r.unikIp).Images().Get(imageName)
+	return err == nil, nil
 }
 
 // Gets all images currently on the machine.
-func (r *Runtime) ListImages() ([]kubecontainer.Image, error) {}
+func (r *Runtime) ListImages() ([]kubecontainer.Image, error) {
+	images, err := client.UnikClient(r.unikIp).Images().All()
+	if err != nil {
+		return nil, errors.New("getting image list", err)
+	}
+	kubeImages := []kubecontainer.Image{}
+	for _, image := range images {
+		kubeImages = append(kubeImages, convertImage(image))
+	}
+	return kubeImages, nil
+}
 
 // Removes the specified image.
-func (r *Runtime) RemoveImage(image kubecontainer.ImageSpec) error {}
+func (r *Runtime) RemoveImage(image kubecontainer.ImageSpec) error {
+	imageName, _ := getImageInfo(image.Image)
+	return client.UnikClient(r.unikIp).Images().Delete(imageName, true)
+}
 
 // Returns Image statistics.
-func (r *Runtime) ImageStats() (*kubecontainer.ImageStats, error) {}
+func (r *Runtime) ImageStats() (*kubecontainer.ImageStats, error) {
+	return &kubecontainer.ImageStats{
+		TotalStorageBytes: 1,
+	}, nil
+}
 
 // Returns the filesystem path of the pod's network namespace; if the
 // runtime does not handle namespace creation itself, or cannot return
@@ -410,11 +429,8 @@ func convertInstance(instance *types.Instance) *kubecontainer.Pod {
 	split := strings.Split(instance.Name, "+")
 	namespace := split[0]
 	name := split[1]
-
-
-
 	image := getImageName(instance.ImageId, instance.Infrastructure)
-
+	state := toContainerState(instance.State)
 	hashInfo := hashable{
 		state: state,
 		namespace: namespace,
@@ -435,7 +451,7 @@ func convertInstance(instance *types.Instance) *kubecontainer.Pod {
 		ImageID: instance.ImageId,
 		Hash: hash(hashInfo),
 		// State is the state of the container.
-		State: toContainerState(instance.State),
+		State: state,
 	}
 
 	return &kubecontainer.Pod{
@@ -443,5 +459,13 @@ func convertInstance(instance *types.Instance) *kubecontainer.Pod {
 		Name: name,
 		Namespace: namespace,
 		Containers: []*kubecontainer.Container{container},
+	}
+}
+
+func convertImage(image *types.Image) kubecontainer.Image {
+	//unik stores the image, not the kubelet
+	return kubecontainer.Image{
+		ID: image.Id,
+		Size: 1,
 	}
 }
