@@ -344,7 +344,45 @@ func (r *Runtime) GetPodContainerID(pod *kubecontainer.Pod) (kubecontainer.Conta
 // default, it returns a snapshot of the container log. Set 'follow' to true to
 // stream the log. Set 'follow' to false and specify the number of lines (e.g.
 // "100" or "all") to tail the log.
-func (r *Runtime) GetContainerLogs(pod *api.Pod, containerID kubecontainer.ContainerID, logOptions *api.PodLogOptions, stdout, stderr io.Writer) (err error) {}
+func (r *Runtime) GetContainerLogs(pod *api.Pod, _ kubecontainer.ContainerID, logOptions *api.PodLogOptions, stdout, _ io.Writer) (err error) {
+	instance, ok := r.podsToInstances[pod.UID]
+	if !ok {
+		return errors.New("instance not found for pod "+string(pod.UID), nil)
+	}
+	follow := false
+	tailLines := 0
+	if logOptions != nil {
+		follow = logOptions.Follow
+		if logOptions.TailLines != nil {
+			tailLines = *logOptions.TailLines
+		}
+	}
+	if follow {
+		stream, err := client.UnikClient(r.unikIp).Instances().AttachLogs(instance.Id, false)
+		if err != nil {
+			return errors.New("failed to attach to logs", err)
+		}
+		if _, err := io.Copy(stdout, stream); err != nil {
+			return errors.New("copying from stream to stdout", err)
+		}
+	} else {
+		logs, err := client.UnikClient(r.unikIp).Instances().GetLogs(instance.Id)
+		if err != nil {
+			return errors.New("failed to get logs", err)
+		}
+		if tailLines > 0 {
+			logLines := strings.Split(logs, "\n")
+			if len(logLines) < tailLines {
+				tailLines = len(logLines)
+			}
+			logs = strings.Join(logLines[tailLines-1:], "\n")
+		}
+		if _, err := stdout.Write([]byte(logs)); err != nil {
+			return errors.New("writing logs to stdout", err)
+		}
+	}
+	return nil
+}
 
 // Delete a container. If the container is still running, an error is returned.
 func (r *Runtime) DeleteContainer(containerID kubecontainer.ContainerID) error {}
@@ -388,7 +426,7 @@ func (r *Runtime) runPod(pod *api.Pod) (*types.Instance, error) {
 	r.mapLock.Lock()
 	defer r.mapLock.Unlock()
 	r.ownedInstances[instance.Id] = instance
-	r.ownedInstances[pod.UID] = instance
+	r.podsToInstances[pod.UID] = instance
 	return instance, nil
 }
 
