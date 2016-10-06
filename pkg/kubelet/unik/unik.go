@@ -20,10 +20,10 @@ import (
 )
 
 type Runtime struct {
-	version *version
-	unikIp  string
+	version        *version
+	unikIp         string
 	ownedInstances map[string]*types.Instance
-	instancesLock sync.RWMutex
+	instancesLock  sync.RWMutex
 }
 
 func New(simpleVer int, unikIp string) *Runtime {
@@ -120,29 +120,71 @@ func (r *Runtime) GarbageCollect(gcPolicy kubecontainer.ContainerGCPolicy, allSo
 	}
 	for _, instance := range instancesToClean {
 		if err := client.UnikClient(r.unikIp).Instances().Delete(instance.Id, false); err != nil {
-			return errors.New("cleaning up stopped instance "+instance.Id, err)
+			return errors.New("cleaning up stopped instance " + instance.Id, err)
 		}
 	}
 	return nil
 }
 
 // Syncs the running pod into the desired pod.
-func (r *Runtime) SyncPod(pod *api.Pod, apiPodStatus api.PodStatus, podStatus *kubecontainer.PodStatus, pullSecrets []api.Secret, backOff *flowcontrol.Backoff) (result kubecontainer.PodSyncResult) {
+func (r *Runtime) SyncPod(desiredPod *api.Pod, desiredPodStatus api.PodStatus, internalPodStatus *kubecontainer.PodStatus, pullSecrets []api.Secret, backOff *flowcontrol.Backoff) (result kubecontainer.PodSyncResult) {
 	if err := func() error {
-		pods, err := r.GetPods(true)
-		if err != nil {
-			return errors.New("getting all pods", err)
+		if len(desiredPod.Spec.Containers) != 1 {
+			podString := fmt.Sprintf("%+v", desiredPod.Spec)
+			return errors.New("unik can only manage single-container pods; you gave me " + podString, nil)
 		}
-		var currentPod *api.Pod
-		for _, knownPod := range pods {
-			if knownPod.ID == pod.UID {
-				currentPod = knownPod
-				break
-			}
+		if len(desiredPodStatus.ContainerStatuses) != 1 {
+			statusString := fmt.Sprintf("%+v", desiredPodStatus)
+			return errors.New("unik can only manage single-container pods; you gave me this status " + statusString, nil)
 		}
-		if currentPod == nil {
-			glog.V(4).Infof("unik: pod to sync: %v no longer found, creating a new one", pod)
+		desiredContainer := desiredPod.Spec.Containers[0]
 
+		internalPod := kubecontainer.ConvertPodStatusToRunningPod(r.Type(), internalPodStatus)
+		internalContainer := internalPod.FindContainerByName(desiredContainer.Name)
+		if internalContainer == nil {
+			glog.V(4).Infof("unik: container to sync: %v no longer found, creating a new one", desiredContainer)
+			if err := r.runPod(desiredPod); err != nil {
+				return errors.New("launching pod", err)
+			}
+			glog.V(4).Infof("unik: instance launched successfully", desiredContainer)
+			result.AddSyncResult(&kubecontainer.SyncResult{
+				Action: kubecontainer.StartContainer,
+				Target: desiredContainer.Name,
+				Message: "instance started",
+			})
+			return nil
+		}
+
+		desiredHash := hash(hashable{
+			state: desiredPodStatus.ContainerStatuses[0].State,
+			namespace: desiredPod.Namespace,
+			name: desiredPod.Name,
+			image: desiredContainer.Image,
+		})
+
+		syncNeeded := internalContainer.Hash != desiredHash
+		if syncNeeded {
+			glog.V(4).Infof("sync needed: desired pod: %+v; desired hash: %v\ninternal pod: %+v, internal hash: %v", desiredPod, desiredHash, internalPod, internalContainer.Hash)
+			if err := r.KillPod(nil, internalPod, nil); err != nil {
+				return errors.New("deleting out-of-sync pod " + internalPod.ID, err)
+			}
+			result.AddSyncResult(kubecontainer.SyncResult{
+				Action: kubecontainer.KillContainer,
+				Target: desiredContainer.Name,
+				Message: "out of sync instance killed",
+			})
+			if err := r.runPod(desiredPod); err != nil {
+				return errors.New("launching pod", err)
+			}
+			glog.V(4).Infof("unik: instance launched successfully", desiredContainer)
+			result.AddSyncResult(&kubecontainer.SyncResult{
+				Action: kubecontainer.StartContainer,
+				Target: desiredContainer.Name,
+				Message: "instance started",
+			})
+			return nil
+		} else {
+			glog.V(4).Infof("no sync needed: for pod %+v", desiredPod)
 		}
 		return nil
 	}(); err != nil {
@@ -150,12 +192,24 @@ func (r *Runtime) SyncPod(pod *api.Pod, apiPodStatus api.PodStatus, podStatus *k
 	}
 	return
 }
-
 // KillPod kills all the containers of a pod. Pod may be nil, running pod must not be.
 // gracePeriodOverride if specified allows the caller to override the pod default grace period.
 // only hard kill paths are allowed to specify a gracePeriodOverride in the kubelet in order to not corrupt user data.
 // it is useful when doing SIGKILL for hard eviction scenarios, or max grace period during soft eviction scenarios.
-func (r *Runtime) KillPod(pod *api.Pod, runningPod kubecontainer.Pod, gracePeriodOverride *int64) error {}
+func (r *Runtime) KillPod(pod *api.Pod, runningPod kubecontainer.Pod, gracePeriodOverride *int64) error {
+	instanceName := getInstanceName(runningPod.Namespace, runningPod.Name)
+	instance, err := client.UnikClient(r.unikIp).Instances().Get(instanceName)
+	if err != nil {
+		return errors.New("could not find instance " + instanceName, err)
+	}
+	if err := client.UnikClient(r.unikIp).Instances().Delete(instance.Id, true); err == nil {
+		return errors.New("deleting instance " + instance.Id, err)
+	}
+	r.instancesLock.Lock()
+	defer r.instancesLock.Unlock()
+	delete(r.ownedInstances, instance.Id)
+	return nil
+}
 
 // GetPodStatus retrieves the status of the pod, including the
 // information of all containers in the pod that are visble in Runtime.
@@ -204,15 +258,11 @@ func (r *Runtime) ExecInContainer(containerID kubecontainer.ContainerID, cmd []s
 // Forward the specified port from the specified pod to the stream.
 func (r *Runtime) PortForward(pod *kubecontainer.Pod, port uint16, stream io.ReadWriteCloser) error {}
 
-
-
-func (r *Runtime) launchPod(pod *api.Pod) error {
-	if len(pod.Spec.Containers) != 1 {
-		return errors.New("unik can only launch a single-container pod", nil)
-	}
+func (r *Runtime) runPod(pod *api.Pod) error {
 	container := pod.Spec.Containers[0]
-	instanceName := pod.Namespace+"+"+pod.Name
-	imageName := container.Image
+	instanceName := getInstanceName(pod.Namespace, pod.Name)
+	imageName := strings.Split(container.Image, ":")[0]
+	//because we store the image name as Name:Infrastructure
 	mountPointsToVols := make(map[string]string)
 	for _, volumeMount := range container.VolumeMounts {
 		volId := volumeMount.Name
@@ -235,7 +285,7 @@ func (r *Runtime) launchPod(pod *api.Pod) error {
 	instance, err := client.UnikClient(r.unikIp).Instances().Run(instanceName, imageName, mountPointsToVols, env, memoryMB, false, false)
 	if err != nil {
 		podString := fmt.Sprintf("%+v", pod)
-		return errors.New("running instance for pod spec "+podString, err)
+		return errors.New("running instance for pod spec " + podString, err)
 	}
 	r.instancesLock.Lock()
 	defer r.instancesLock.Unlock()
@@ -243,14 +293,29 @@ func (r *Runtime) launchPod(pod *api.Pod) error {
 	return nil
 }
 
+
+//information about an instance/pod to hash
+type hashable struct {
+	state     kubecontainer.ContainerState
+	namespace string
+	name      string
+	image     string
+}
+
+func hash(info hashable) uint64 {
+	hashStr := fmt.Sprintf("{state: %v, namespace: %v, name: %v, image: %v}", info.state, info.namespace, info.name, info.image)
+	return binary.BigEndian.Uint64([]byte{hashStr})
+}
+
+func getInstanceName(namespace, name string) string {
+	return namespace + "+" + name
+}
+
 func convertInstance(instance *types.Instance) *kubecontainer.Pod {
 	//instance name = namespace+"+"+name
 	split := strings.Split(instance.Name, "+")
 	namespace := split[0]
 	name := split[1]
-
-	hashStr := fmt.Sprintf("%s", instance.String())
-	hash := binary.BigEndian.Uint64([]byte{hashStr})
 
 	var state kubecontainer.ContainerState
 	switch instance.State {
@@ -266,6 +331,15 @@ func convertInstance(instance *types.Instance) *kubecontainer.Pod {
 		state = kubecontainer.ContainerStateUnknown
 	}
 
+	image := instance.ImageId + ":" + instance.Infrastructure
+
+	hashInfo := hashable{
+		state: state,
+		namespace: namespace,
+		name: name,
+		image: image,
+	}
+
 	//right now we are obeying a one vm - per - pod format; so no worries.
 	//one pod = one vm = one "container"
 	container := &kubecontainer.Container{
@@ -275,9 +349,9 @@ func convertInstance(instance *types.Instance) *kubecontainer.Pod {
 		},
 		Name: name,
 		//"tag" is infrastructure for now
-		Image: instance.ImageId + ":" + instance.Infrastructure,
+		Image: image,
 		ImageID: instance.ImageId,
-		Hash: hash,
+		Hash: hash(hashInfo),
 		// State is the state of the container.
 		State: state,
 	}
