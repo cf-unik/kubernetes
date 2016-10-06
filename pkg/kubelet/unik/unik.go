@@ -385,14 +385,22 @@ func (r *Runtime) GetContainerLogs(pod *api.Pod, _ kubecontainer.ContainerID, lo
 }
 
 // Delete a container. If the container is still running, an error is returned.
-func (r *Runtime) DeleteContainer(containerID kubecontainer.ContainerID) error {}
+func (r *Runtime) DeleteContainer(containerID kubecontainer.ContainerID) error {
+	return errors.New("don't kill the container, kill the pod", nil)
+}
 
-func (r *Runtime) AttachContainer(id kubecontainer.ContainerID, stdin io.Reader, stdout, stderr io.WriteCloser, tty bool, resize <-chan term.Size) (err error) {}
+func (r *Runtime) AttachContainer(id kubecontainer.ContainerID, stdin io.Reader, stdout, stderr io.WriteCloser, tty bool, resize <-chan term.Size) (err error) {
+	return errors.New("attaching to unikernels not currently supported in unik", nil)
+}
 
-func (r *Runtime) ExecInContainer(containerID kubecontainer.ContainerID, cmd []string, stdin io.Reader, stdout, stderr io.WriteCloser, tty bool, resize <-chan term.Size) error {}
+func (r *Runtime) ExecInContainer(containerID kubecontainer.ContainerID, cmd []string, stdin io.Reader, stdout, stderr io.WriteCloser, tty bool, resize <-chan term.Size) error {
+	return errors.New("cannot execute commands in unikernels", nil)
+}
 
 // Forward the specified port from the specified pod to the stream.
-func (r *Runtime) PortForward(pod *kubecontainer.Pod, port uint16, stream io.ReadWriteCloser) error {}
+func (r *Runtime) PortForward(pod *kubecontainer.Pod, port uint16, stream io.ReadWriteCloser) error {
+	return errors.New("port forwarding not yet implemented", nil)
+}
 
 func (r *Runtime) runPod(pod *api.Pod) (*types.Instance, error) {
 	container := pod.Spec.Containers[0]
