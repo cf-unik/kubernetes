@@ -20,10 +20,11 @@ import (
 )
 
 type Runtime struct {
-	version        *version
-	unikIp         string
-	ownedInstances map[string]*types.Instance
-	instancesLock  sync.RWMutex
+	version          *version
+	unikIp           string
+	ownedInstances   map[string]*types.Instance
+	instanceRestarts map[string]int
+	mapLock          sync.RWMutex
 }
 
 func New(simpleVer int, unikIp string) *Runtime {
@@ -31,6 +32,7 @@ func New(simpleVer int, unikIp string) *Runtime {
 		version: &version{simpleVer: simpleVer},
 		unikIp: unikIp,
 		ownedInstances: make(map[string]*types.Instance),
+		instanceRestarts: make(map[string]int),
 	}
 }
 
@@ -143,7 +145,7 @@ func (r *Runtime) SyncPod(desiredPod *api.Pod, desiredPodStatus api.PodStatus, i
 		internalContainer := internalPod.FindContainerByName(desiredContainer.Name)
 		if internalContainer == nil {
 			glog.V(4).Infof("unik: container to sync: %v no longer found, creating a new one", desiredContainer)
-			if err := r.runPod(desiredPod); err != nil {
+			if _, err := r.runPod(desiredPod); err != nil {
 				return errors.New("launching pod", err)
 			}
 			glog.V(4).Infof("unik: instance launched successfully", desiredContainer)
@@ -173,7 +175,8 @@ func (r *Runtime) SyncPod(desiredPod *api.Pod, desiredPodStatus api.PodStatus, i
 				Target: desiredContainer.Name,
 				Message: "out of sync instance killed",
 			})
-			if err := r.runPod(desiredPod); err != nil {
+			instance, err := r.runPod(desiredPod)
+			if err != nil {
 				return errors.New("launching pod", err)
 			}
 			glog.V(4).Infof("unik: instance launched successfully", desiredContainer)
@@ -182,6 +185,10 @@ func (r *Runtime) SyncPod(desiredPod *api.Pod, desiredPodStatus api.PodStatus, i
 				Target: desiredContainer.Name,
 				Message: "instance started",
 			})
+			r.mapLock.Lock()
+			defer r.mapLock.Unlock()
+			r.instanceRestarts[instance.Id] += 1
+
 			return nil
 		} else {
 			glog.V(4).Infof("no sync needed: for pod %+v", desiredPod)
@@ -205,15 +212,51 @@ func (r *Runtime) KillPod(pod *api.Pod, runningPod kubecontainer.Pod, gracePerio
 	if err := client.UnikClient(r.unikIp).Instances().Delete(instance.Id, true); err == nil {
 		return errors.New("deleting instance " + instance.Id, err)
 	}
-	r.instancesLock.Lock()
-	defer r.instancesLock.Unlock()
+	r.mapLock.Lock()
+	defer r.mapLock.Unlock()
 	delete(r.ownedInstances, instance.Id)
 	return nil
 }
 
 // GetPodStatus retrieves the status of the pod, including the
 // information of all containers in the pod that are visble in Runtime.
-func (r *Runtime) GetPodStatus(uid kubetypes.UID, name, namespace string) (*kubecontainer.PodStatus, error) {}
+func (r *Runtime) GetPodStatus(uid kubetypes.UID, name, namespace string) (*kubecontainer.PodStatus, error) {
+	instance, err := client.UnikClient(r.unikIp).Instances().Get(getInstanceName(namespace, name))
+	if err != nil {
+		return nil, errors.New("getting instance from unik", err)
+	}
+	state := toContainerState(instance.State)
+	imageName := getImageName(instance.ImageId, instance.Infrastructure)
+	newHash := hash(hashable{
+		state: state,
+		namespace: namespace,
+		name: name,
+		image: imageName,
+	})
+	r.mapLock.RLock()
+	defer r.mapLock.RUnlock()
+	restarts := r.instanceRestarts[instance.Id]
+
+	return &kubecontainer.PodStatus{
+		ID: uid,
+		Name: name,
+		Namespace: namespace,
+		IP: instance.IpAddress,
+		ContainerStatuses: []*kubecontainer.ContainerStatus{
+			&kubecontainer.ContainerStatus{
+				ID: instance.Id,
+				Name: instance.Name,
+				State: state,
+				CreatedAt: instance.Created,
+				StartedAt: instance.Created,
+				Image: imageName,
+				ImageID: instance.ImageId,
+				Hash: newHash,
+				RestartCount: restarts,
+			},
+		},
+	}
+}
 
 // PullImage pulls an image from the network to local storage using the supplied
 // secrets if necessary.
@@ -258,7 +301,7 @@ func (r *Runtime) ExecInContainer(containerID kubecontainer.ContainerID, cmd []s
 // Forward the specified port from the specified pod to the stream.
 func (r *Runtime) PortForward(pod *kubecontainer.Pod, port uint16, stream io.ReadWriteCloser) error {}
 
-func (r *Runtime) runPod(pod *api.Pod) error {
+func (r *Runtime) runPod(pod *api.Pod) (*types.Instance, error) {
 	container := pod.Spec.Containers[0]
 	instanceName := getInstanceName(pod.Namespace, pod.Name)
 	imageName := strings.Split(container.Image, ":")[0]
@@ -285,12 +328,12 @@ func (r *Runtime) runPod(pod *api.Pod) error {
 	instance, err := client.UnikClient(r.unikIp).Instances().Run(instanceName, imageName, mountPointsToVols, env, memoryMB, false, false)
 	if err != nil {
 		podString := fmt.Sprintf("%+v", pod)
-		return errors.New("running instance for pod spec " + podString, err)
+		return nil, errors.New("running instance for pod spec " + podString, err)
 	}
-	r.instancesLock.Lock()
-	defer r.instancesLock.Unlock()
+	r.mapLock.Lock()
+	defer r.mapLock.Unlock()
 	r.ownedInstances[instance.Id] = instance
-	return nil
+	return instance, nil
 }
 
 
@@ -311,14 +354,13 @@ func getInstanceName(namespace, name string) string {
 	return namespace + "+" + name
 }
 
-func convertInstance(instance *types.Instance) *kubecontainer.Pod {
-	//instance name = namespace+"+"+name
-	split := strings.Split(instance.Name, "+")
-	namespace := split[0]
-	name := split[1]
+func getImageName(imageId, infrastructure string) string {
+	return imageId + ":" + infrastructure
+}
 
+func toContainerState(instanceState types.InstanceState) kubecontainer.ContainerState {
 	var state kubecontainer.ContainerState
-	switch instance.State {
+	switch instanceState {
 	case types.InstanceState_Pending:
 		state = kubecontainer.ContainerStateCreated
 	case types.InstanceState_Running:
@@ -330,8 +372,18 @@ func convertInstance(instance *types.Instance) *kubecontainer.Pod {
 	case types.InstanceState_Unknown:
 		state = kubecontainer.ContainerStateUnknown
 	}
+	return state
+}
 
-	image := instance.ImageId + ":" + instance.Infrastructure
+func convertInstance(instance *types.Instance) *kubecontainer.Pod {
+	//instance name = namespace+"+"+name
+	split := strings.Split(instance.Name, "+")
+	namespace := split[0]
+	name := split[1]
+
+
+
+	image := getImageName(instance.ImageId, instance.Infrastructure)
 
 	hashInfo := hashable{
 		state: state,
@@ -353,7 +405,7 @@ func convertInstance(instance *types.Instance) *kubecontainer.Pod {
 		ImageID: instance.ImageId,
 		Hash: hash(hashInfo),
 		// State is the state of the container.
-		State: state,
+		State: toContainerState(instance.State),
 	}
 
 	return &kubecontainer.Pod{
