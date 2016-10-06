@@ -25,6 +25,7 @@ type Runtime struct {
 	version          *version
 	unikIp           string
 	ownedInstances   map[string]*types.Instance
+	podsToInstances  map[string]*types.Instance
 	instanceRestarts map[string]int
 	hubConfig        string
 	mapLock          sync.RWMutex
@@ -43,6 +44,7 @@ func New(simpleVer int, unikIp string) *Runtime {
 		unikIp: unikIp,
 		ownedInstances: make(map[string]*types.Instance),
 		instanceRestarts: make(map[string]int),
+		podsToInstances: make(map[string]int),
 		hubConfig: config.HubConfig{
 			URL: hubUrl,
 			Username: hubUser,
@@ -218,7 +220,7 @@ func (r *Runtime) SyncPod(desiredPod *api.Pod, desiredPodStatus api.PodStatus, i
 // gracePeriodOverride if specified allows the caller to override the pod default grace period.
 // only hard kill paths are allowed to specify a gracePeriodOverride in the kubelet in order to not corrupt user data.
 // it is useful when doing SIGKILL for hard eviction scenarios, or max grace period during soft eviction scenarios.
-func (r *Runtime) KillPod(pod *api.Pod, runningPod kubecontainer.Pod, gracePeriodOverride *int64) error {
+func (r *Runtime) KillPod(_ *api.Pod, runningPod kubecontainer.Pod, gracePeriodOverride *int64) error {
 	instanceName := getInstanceName(runningPod.Namespace, runningPod.Name)
 	instance, err := client.UnikClient(r.unikIp).Instances().Get(instanceName)
 	if err != nil {
@@ -230,6 +232,7 @@ func (r *Runtime) KillPod(pod *api.Pod, runningPod kubecontainer.Pod, gracePerio
 	r.mapLock.Lock()
 	defer r.mapLock.Unlock()
 	delete(r.ownedInstances, instance.Id)
+	delete(r.podsToInstances, runningPod.ID)
 	return nil
 }
 
@@ -319,12 +322,23 @@ func (r *Runtime) ImageStats() (*kubecontainer.ImageStats, error) {
 // runtime does not handle namespace creation itself, or cannot return
 // the network namespace path, it should return an error.
 // by all containers in the pod.
-func (r *Runtime) GetNetNS(containerID kubecontainer.ContainerID) (string, error) {}
+func (r *Runtime) GetNetNS(containerID kubecontainer.ContainerID) (string, error) {
+	return "", errors.New("unik runtime does not handle namespace creation", nil)
+}
 
 // Returns the container ID that represents the Pod, as passed to network
 // plugins. For example, if the runtime uses an infra container, returns
 // the infra container's ContainerID.
-func (r *Runtime) GetPodContainerID(*kubecontainer.Pod) (kubecontainer.ContainerID, error) {}
+func (r *Runtime) GetPodContainerID(pod *kubecontainer.Pod) (kubecontainer.ContainerID, error) {
+	instance, ok := r.podsToInstances[pod.ID]
+	if !ok {
+		return kubecontainer.ContainerID{}, errors.New("instance not found for pod "+string(pod.ID), nil)
+	}
+	return kubecontainer.ContainerID{
+		Type: r.Type(),
+		ID: instance.Id,
+	}, nil
+}
 
 // GetContainerLogs returns logs of a specific container. By
 // default, it returns a snapshot of the container log. Set 'follow' to true to
@@ -374,6 +388,7 @@ func (r *Runtime) runPod(pod *api.Pod) (*types.Instance, error) {
 	r.mapLock.Lock()
 	defer r.mapLock.Unlock()
 	r.ownedInstances[instance.Id] = instance
+	r.ownedInstances[pod.UID] = instance
 	return instance, nil
 }
 
