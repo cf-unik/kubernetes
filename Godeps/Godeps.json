@@ -8,6 +8,14 @@
 		"./..."
 	],
 	"Deps": [
+                {
+                        "ImportPath": "github.com/emc-advanced-dev/pkg/errors",
+                        "Rev": "96dbf45cb1950972c03965dedb6f4572d451528f",
+                },
+                {
+                        "ImportPath": "github.com/emc-advanced-dev/unik/",
+                        "Rev": "007758a87b6b23f804efe755a8b6a0bde92843e9",
+                },
 		{
 			"ImportPath": "bitbucket.org/bertimus9/systemstat",
 			"Rev": "1468fd0db20598383c9393cccaa547de6ad99e5e"
