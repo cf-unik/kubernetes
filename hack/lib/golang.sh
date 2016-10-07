@@ -54,8 +54,6 @@ if [[ "${KUBE_FASTBUILD:-}" == "true" ]]; then
   readonly KUBE_SERVER_PLATFORMS=(linux/amd64)
   if [[ "${KUBE_BUILDER_OS:-}" == "darwin"* ]]; then
     readonly KUBE_TEST_PLATFORMS=(
-      darwin/amd64
-      linux/amd64
     )
     readonly KUBE_CLIENT_PLATFORMS=(
       darwin/amd64
@@ -97,8 +95,6 @@ else
 
   # Which platforms we should compile test targets for. Not all client platforms need these tests
   readonly KUBE_TEST_PLATFORMS=(
-    linux/amd64
-    darwin/amd64
     windows/amd64
   )
 fi
@@ -122,8 +118,6 @@ kube::golang::test_targets() {
     cmd/linkcheck
     examples/k8petstore/web-server/src
     federation/cmd/genfeddocs
-    vendor/github.com/onsi/ginkgo/ginkgo
-    test/e2e/e2e.test
   )
   if [ -n "${KUBERNETES_CONTRIB:-}" ]; then
     for contrib in "${KUBERNETES_CONTRIB}"; do
@@ -150,7 +144,6 @@ readonly KUBE_TEST_PORTABLE=(
 # same platforms with kube-apiserver.
 readonly KUBE_NODE_TEST_TARGETS=(
   vendor/github.com/onsi/ginkgo/ginkgo
-  test/e2e_node/e2e_node.test
 )
 readonly KUBE_NODE_TEST_BINARIES=("${KUBE_NODE_TEST_TARGETS[@]##*/}")
 readonly KUBE_NODE_TEST_PLATFORMS=("${KUBE_SERVER_PLATFORMS[@]}")
