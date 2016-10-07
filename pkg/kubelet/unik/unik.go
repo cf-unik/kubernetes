@@ -27,7 +27,7 @@ type Runtime struct {
 	ownedInstances   map[string]*types.Instance
 	podsToInstances  map[string]*types.Instance
 	instanceRestarts map[string]int
-	hubConfig        string
+	hubConfig        config.HubConfig
 	mapLock          sync.RWMutex
 }
 
@@ -45,8 +45,8 @@ func New(simpleVer int, unikIp string) *Runtime {
 		version: &version{simpleVer: simpleVer},
 		unikIp: unikIp,
 		ownedInstances: make(map[string]*types.Instance),
+		podsToInstances: make(map[string]*types.Instance),
 		instanceRestarts: make(map[string]int),
-		podsToInstances: make(map[string]int),
 		hubConfig: config.HubConfig{
 			URL: hubUrl,
 			Username: hubUser,
@@ -176,8 +176,25 @@ func (r *Runtime) SyncPod(desiredPod *api.Pod, desiredPodStatus api.PodStatus, i
 			return nil
 		}
 
+		state := internalContainer.State
+		if desiredPodStatus.ContainerStatuses[0].State.Running != nil {
+			state = kubecontainer.ContainerStateRunning
+		} else if desiredPodStatus.ContainerStatuses[0].State.Terminated != nil {
+			if internalContainer.State != kubecontainer.ContainerStateExited {
+				if err := r.KillPod(nil, internalPod, nil); err != nil {
+					return errors.New("deleting out-of-sync pod " + string(internalPod.ID), err)
+				}
+				result.AddSyncResult(&kubecontainer.SyncResult{
+					Action: kubecontainer.KillContainer,
+					Target: desiredContainer.Name,
+					Message: "out of sync instance killed",
+				})
+			}
+			return nil
+		}
+
 		desiredHash := hash(hashable{
-			state: desiredPodStatus.ContainerStatuses[0].State,
+			state: state,
 			namespace: desiredPod.Namespace,
 			name: desiredPod.Name,
 			image: desiredContainer.Image,
@@ -187,9 +204,9 @@ func (r *Runtime) SyncPod(desiredPod *api.Pod, desiredPodStatus api.PodStatus, i
 		if syncNeeded {
 			glog.V(4).Infof("sync needed: desired pod: %+v; desired hash: %v\ninternal pod: %+v, internal hash: %v", desiredPod, desiredHash, internalPod, internalContainer.Hash)
 			if err := r.KillPod(nil, internalPod, nil); err != nil {
-				return errors.New("deleting out-of-sync pod " + internalPod.ID, err)
+				return errors.New("deleting out-of-sync pod " + string(internalPod.ID), err)
 			}
-			result.AddSyncResult(kubecontainer.SyncResult{
+			result.AddSyncResult(&kubecontainer.SyncResult{
 				Action: kubecontainer.KillContainer,
 				Target: desiredContainer.Name,
 				Message: "out of sync instance killed",
@@ -234,7 +251,7 @@ func (r *Runtime) KillPod(_ *api.Pod, runningPod kubecontainer.Pod, gracePeriodO
 	r.mapLock.Lock()
 	defer r.mapLock.Unlock()
 	delete(r.ownedInstances, instance.Id)
-	delete(r.podsToInstances, runningPod.ID)
+	delete(r.podsToInstances, string(runningPod.ID))
 	return nil
 }
 
@@ -264,7 +281,10 @@ func (r *Runtime) GetPodStatus(uid kubetypes.UID, name, namespace string) (*kube
 		IP: instance.IpAddress,
 		ContainerStatuses: []*kubecontainer.ContainerStatus{
 			&kubecontainer.ContainerStatus{
-				ID: instance.Id,
+				ID: kubecontainer.ContainerID{
+					Type: r.Type(),
+					ID: instance.Id,
+				},
 				Name: instance.Name,
 				State: state,
 				CreatedAt: instance.Created,
@@ -275,7 +295,7 @@ func (r *Runtime) GetPodStatus(uid kubetypes.UID, name, namespace string) (*kube
 				RestartCount: restarts,
 			},
 		},
-	}
+	}, nil
 }
 
 // PullImage pulls an image from the network to local storage using the supplied
@@ -284,7 +304,7 @@ func (r *Runtime) PullImage(image kubecontainer.ImageSpec, pullSecrets []api.Sec
 	imageName, infrastructure := getImageInfo(image.Image)
 	//TODO: this may not be the format in the future, but currently works...
 	provider := strings.ToLower(infrastructure)
-	return client.UnikClient(r.unikIp).Images().Pull(r.hubConfig, imageName, provider)
+	return client.UnikClient(r.unikIp).Images().Pull(r.hubConfig, imageName, provider, true)
 }
 
 // IsImagePresent checks whether the container image is already in the local storage.
@@ -332,7 +352,7 @@ func (r *Runtime) GetNetNS(containerID kubecontainer.ContainerID) (string, error
 // plugins. For example, if the runtime uses an infra container, returns
 // the infra container's ContainerID.
 func (r *Runtime) GetPodContainerID(pod *kubecontainer.Pod) (kubecontainer.ContainerID, error) {
-	instance, ok := r.podsToInstances[pod.ID]
+	instance, ok := r.podsToInstances[string(pod.ID)]
 	if !ok {
 		return kubecontainer.ContainerID{}, errors.New("instance not found for pod "+string(pod.ID), nil)
 	}
@@ -347,12 +367,12 @@ func (r *Runtime) GetPodContainerID(pod *kubecontainer.Pod) (kubecontainer.Conta
 // stream the log. Set 'follow' to false and specify the number of lines (e.g.
 // "100" or "all") to tail the log.
 func (r *Runtime) GetContainerLogs(pod *api.Pod, _ kubecontainer.ContainerID, logOptions *api.PodLogOptions, stdout, _ io.Writer) (err error) {
-	instance, ok := r.podsToInstances[pod.UID]
+	instance, ok := r.podsToInstances[string(pod.UID)]
 	if !ok {
 		return errors.New("instance not found for pod "+string(pod.UID), nil)
 	}
 	follow := false
-	tailLines := 0
+	tailLines := int64(0)
 	if logOptions != nil {
 		follow = logOptions.Follow
 		if logOptions.TailLines != nil {
@@ -374,8 +394,8 @@ func (r *Runtime) GetContainerLogs(pod *api.Pod, _ kubecontainer.ContainerID, lo
 		}
 		if tailLines > 0 {
 			logLines := strings.Split(logs, "\n")
-			if len(logLines) < tailLines {
-				tailLines = len(logLines)
+			if int64(len(logLines)) < tailLines {
+				tailLines = int64(len(logLines))
 			}
 			logs = strings.Join(logLines[tailLines-1:], "\n")
 		}
@@ -436,7 +456,7 @@ func (r *Runtime) runPod(pod *api.Pod) (*types.Instance, error) {
 	r.mapLock.Lock()
 	defer r.mapLock.Unlock()
 	r.ownedInstances[instance.Id] = instance
-	r.podsToInstances[pod.UID] = instance
+	r.podsToInstances[string(pod.UID)] = instance
 	return instance, nil
 }
 
@@ -451,15 +471,15 @@ type hashable struct {
 
 func hash(info hashable) uint64 {
 	hashStr := fmt.Sprintf("{state: %v, namespace: %v, name: %v, image: %v}", info.state, info.namespace, info.name, info.image)
-	return binary.BigEndian.Uint64([]byte{hashStr})
+	return binary.BigEndian.Uint64([]byte(hashStr))
 }
 
 func getInstanceName(namespace, name string) string {
 	return namespace + "+" + name
 }
 
-func getImageName(imageId, infrastructure string) string {
-	return imageId + ":" + infrastructure
+func getImageName(imageId string, infrastructure types.Infrastructure) string {
+	return imageId + ":" + string(infrastructure)
 }
 
 func getImageInfo(kubernetesImageName string) (string, string) {
