@@ -412,6 +412,7 @@ func DeepCopy_v1alpha1_KubeletConfiguration(in interface{}, out interface{}, c *
 			out.AllowedUnsafeSysctls = nil
 		}
 		out.ExperimentalRuntimeIntegrationType = in.ExperimentalRuntimeIntegrationType
+		out.UnikIP = in.UnikIP
 		return nil
 	}
 }

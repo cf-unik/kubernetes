@@ -486,4 +486,6 @@ type KubeletConfiguration struct {
 	// How to integrate with runtime. If set to CRI, kubelet will switch to
 	// using the new Container Runtine Interface.
 	ExperimentalRuntimeIntegrationType string `json:"experimentalRuntimeIntegrationType,omitempty"`
+	// ip of the unik backend the kubelet should use to initailize the Unik runtime
+	UnikIP string `json:"UnikIP,omitempty"`
 }
