@@ -31,6 +31,8 @@ type Runtime struct {
 	mapLock          sync.RWMutex
 }
 
+const Type_Unik = "Unik"
+
 func New(simpleVer int, unikIp string) *Runtime {
 	hubUrl := os.Getenv("UNIK_HUB_URL")
 	if hubUrl == "" {
@@ -55,7 +57,7 @@ func New(simpleVer int, unikIp string) *Runtime {
 
 // Type returns the type of the container runtime.
 func (r *Runtime) Type() string {
-	return "Unik"
+	return Type_Unik
 }
 
 // Version returns the version information of the container runtime.
@@ -108,7 +110,7 @@ func (r *Runtime) GetPods(all bool) ([]*kubecontainer.Pod, error) {
 	pods := []*kubecontainer.Pod{}
 	for _, instance := range instances {
 		if all || instance.State == types.InstanceState_Running {
-			pods = append(pods, convertInstance(instance))
+			pods = append(pods, r.convertInstance(instance))
 		}
 	}
 	return pods, nil
@@ -485,7 +487,7 @@ func toContainerState(instanceState types.InstanceState) kubecontainer.Container
 	return state
 }
 
-func convertInstance(instance *types.Instance) *kubecontainer.Pod {
+func (r *Runtime) convertInstance(instance *types.Instance) *kubecontainer.Pod {
 	//instance name = namespace+"+"+name
 	split := strings.Split(instance.Name, "+")
 	namespace := split[0]
@@ -503,7 +505,7 @@ func convertInstance(instance *types.Instance) *kubecontainer.Pod {
 	//one pod = one vm = one "container"
 	container := &kubecontainer.Container{
 		ID: kubecontainer.ContainerID{
-			Type: "unik",
+			Type: r.Type(),
 			ID: instance.Id,
 		},
 		Name: name,

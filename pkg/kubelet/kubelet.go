@@ -105,6 +105,8 @@ import (
 	"k8s.io/kubernetes/pkg/watch"
 	"k8s.io/kubernetes/plugin/pkg/scheduler/algorithm/predicates"
 	"k8s.io/kubernetes/third_party/forked/golang/expansion"
+	"k8s.io/kubernetes/pkg/kubelet/unik"
+	"k8s.io/kubernetes/pkg/kubelet/mux"
 )
 
 const (
@@ -665,6 +667,72 @@ func NewMainKubelet(kubeCfg *componentconfig.KubeletConfiguration, kubeDeps *Kub
 		if err != nil {
 			return nil, err
 		}
+	case "mux":
+		unikRuntime := unik.New(1, kubeCfg.UnikIP)
+		var dockerRuntime kubecontainer.Runtime
+		switch kubeCfg.ExperimentalRuntimeIntegrationType {
+		case "cri":
+			// Use the new CRI shim for docker. This is need for testing the
+			// docker integration through CRI, and may be removed in the future.
+			dockerService := dockershim.NewDockerService(klet.dockerClient)
+			dockerRuntime, err = kuberuntime.NewKubeGenericRuntimeManager(
+				kubecontainer.FilterEventRecorder(kubeDeps.Recorder),
+				klet.livenessManager,
+				containerRefManager,
+				klet.podManager,
+				kubeDeps.OSInterface,
+				klet.networkPlugin,
+				klet,
+				klet.httpClient,
+				imageBackOff,
+				kubeCfg.SerializeImagePulls,
+				float32(kubeCfg.RegistryPullQPS),
+				int(kubeCfg.RegistryBurst),
+				klet.cpuCFSQuota,
+				dockerService,
+				dockerService,
+			)
+			if err != nil {
+				return nil, err
+			}
+		default:
+			// Only supported one for now, continue.
+			dockerRuntime = dockertools.NewDockerManager(
+				kubeDeps.DockerClient,
+				kubecontainer.FilterEventRecorder(kubeDeps.Recorder),
+				klet.livenessManager,
+				containerRefManager,
+				klet.podManager,
+				machineInfo,
+				kubeCfg.PodInfraContainerImage,
+				float32(kubeCfg.RegistryPullQPS),
+				int(kubeCfg.RegistryBurst),
+				containerLogsDir,
+				kubeDeps.OSInterface,
+				klet.networkPlugin,
+				klet,
+				klet.httpClient,
+				dockerExecHandler,
+				kubeDeps.OOMAdjuster,
+				procFs,
+				klet.cpuCFSQuota,
+				imageBackOff,
+				kubeCfg.SerializeImagePulls,
+				kubeCfg.EnableCustomMetrics,
+				// If using "kubenet", the Kubernetes network plugin that wraps
+				// CNI's bridge plugin, it knows how to set the hairpin veth flag
+				// so we tell the container runtime to back away from setting it.
+				// If the kubelet is started with any other plugin we can't be
+				// sure it handles the hairpin case so we instruct the docker
+				// runtime to set the flag instead.
+				klet.hairpinMode == componentconfig.HairpinVeth && kubeCfg.NetworkPluginName != "kubenet",
+				kubeCfg.SeccompProfileRoot,
+				kubeDeps.ContainerRuntimeOptions...,
+			)
+		}
+		klet.containerRuntime = mux.New(dockerRuntime, unikRuntime)
+	case "Unik":
+		klet.containerRuntime = unik.New(1, kubeCfg.UnikIP)
 	default:
 		return nil, fmt.Errorf("unsupported container runtime %q specified", kubeCfg.ContainerRuntime)
 	}
