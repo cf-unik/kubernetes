@@ -129,6 +129,7 @@ KUBELET_PORT=${KUBELET_PORT:-10250}
 LOG_LEVEL=${LOG_LEVEL:-3}
 CONTAINER_RUNTIME=${CONTAINER_RUNTIME:-"docker"}
 CONTAINER_RUNTIME_ENDPOINT=${CONTAINER_RUNTIME_ENDPOINT:-""}
+UNIK_ENDPOINT=${UNIK_ENDPOINT:-""}
 IMAGE_SERVICE_ENDPOINT=${IMAGE_SERVICE_ENDPOINT:-""}
 RKT_PATH=${RKT_PATH:-""}
 RKT_STAGE1_IMAGE=${RKT_STAGE1_IMAGE:-""}
@@ -390,6 +391,12 @@ function start_kubelet {
         container_runtime_endpoint_args="--container-runtime-endpoint=${CONTAINER_RUNTIME_ENDPOINT}"
       fi
 
+      unik_endpoint_args=""
+      if [[ -n "${UNIK_ENDPOINT}" ]]; then
+        unik_endpoint_args="--unik-ip=${UNIK_ENDPOINT}"
+      fi
+
+
       image_service_endpoint_args=""
       if [[ -n "${IMAGE_SERVICE_ENDPOINT}" ]]; then
 	image_service_endpoint_args="--image-service-endpoint=${IMAGE_SERVICE_ENDPOINT}"
@@ -413,6 +420,7 @@ function start_kubelet {
         ${net_plugin_args} \
         ${kubenet_plugin_args} \
         ${container_runtime_endpoint_args} \
+	${unik_endpoint_args} \
         ${image_service_endpoint_args} \
         --port="$KUBELET_PORT" >"${KUBELET_LOG}" 2>&1 &
       KUBELET_PID=$!
