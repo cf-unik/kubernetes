@@ -110,7 +110,10 @@ func (r *Runtime) GetPods(all bool) ([]*kubecontainer.Pod, error) {
 	pods := []*kubecontainer.Pod{}
 	for _, instance := range instances {
 		if all || instance.State == types.InstanceState_Running {
-			pods = append(pods, r.convertInstance(instance))
+			pod := r.convertInstance(instance)
+			if pod != nil {
+				pods = append(pods, pod)
+			}
 		}
 	}
 	return pods, nil
@@ -510,6 +513,10 @@ func toContainerState(instanceState types.InstanceState) kubecontainer.Container
 func (r *Runtime) convertInstance(instance *types.Instance) *kubecontainer.Pod {
 	//instance name = namespace+"+"+name
 	split := strings.Split(instance.Name, "+")
+	if len(split) != 2 {
+		glog.V(4).Infof("%v doesn't belong to k8s, skipping", instance)
+		return nil
+	}
 	namespace := split[0]
 	name := split[1]
 	image := getImageName(instance.ImageId, instance.Infrastructure)
