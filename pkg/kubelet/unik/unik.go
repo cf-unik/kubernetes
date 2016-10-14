@@ -25,6 +25,7 @@ type Runtime struct {
 	version          *version
 	unikIp           string
 	ownedInstances   map[string]*types.Instance
+	ownedContainers  map[string]api.Container
 	podsToInstances  map[string]*types.Instance
 	instanceRestarts map[string]int
 	hubConfig        config.HubConfig
@@ -37,7 +38,7 @@ func New(simpleVer int, unikIp string) *Runtime {
 	hubUrl := os.Getenv("UNIK_HUB_URL")
 	if hubUrl == "" {
 		hubUrl = "http://hub.project-unik.io"
-		glog.V(4).Infof("unik: no UNIK_HUB_URL provided, using default %v", hubUrl)
+		glog.Infof("unik: no UNIK_HUB_URL provided, using default %v", hubUrl)
 	}
 	hubUser := os.Getenv("UNIK_HUB_USER")
 	hubPass := os.Getenv("UNIK_HUB_PASSWORD")
@@ -45,6 +46,7 @@ func New(simpleVer int, unikIp string) *Runtime {
 		version: &version{simpleVer: simpleVer},
 		unikIp: unikIp,
 		ownedInstances: make(map[string]*types.Instance),
+		ownedContainers: make(map[string]api.Container),
 		podsToInstances: make(map[string]*types.Instance),
 		instanceRestarts: make(map[string]int),
 		hubConfig: config.HubConfig{
@@ -125,7 +127,7 @@ func (r *Runtime) GetPods(all bool) ([]*kubecontainer.Pod, error) {
 // file). In this case, garbage collector should refrain itself from aggressive
 // behavior such as removing all containers of unrecognized pods (yet).
 func (r *Runtime) GarbageCollect(gcPolicy kubecontainer.ContainerGCPolicy, allSourcesReady bool) error {
-	glog.V(4).Infof("unik: Garbage collecting triggered with policy %v", gcPolicy)
+	glog.Infof("unik: Garbage collecting triggered with policy %v", gcPolicy)
 
 	instances, err := client.UnikClient(r.unikIp).Instances().All()
 	if err != nil {
@@ -153,6 +155,7 @@ func (r *Runtime) GarbageCollect(gcPolicy kubecontainer.ContainerGCPolicy, allSo
 // Syncs the running pod into the desired pod.
 func (r *Runtime) SyncPod(desiredPod *api.Pod, desiredPodStatus api.PodStatus, internalPodStatus *kubecontainer.PodStatus, pullSecrets []api.Secret, backOff *flowcontrol.Backoff) (result kubecontainer.PodSyncResult) {
 	if err := func() error {
+		glog.Info("UNIK DEBUG syncing desired pod", desiredPod)
 		if len(desiredPod.Spec.Containers) != 1 {
 			podString := fmt.Sprintf("%+v", desiredPod.Spec)
 			return errors.New("unik can only manage single-container pods; you gave me " + podString, nil)
@@ -164,13 +167,12 @@ func (r *Runtime) SyncPod(desiredPod *api.Pod, desiredPodStatus api.PodStatus, i
 		desiredContainer := desiredPod.Spec.Containers[0]
 
 		internalPod := kubecontainer.ConvertPodStatusToRunningPod(r.Type(), internalPodStatus)
-		internalContainer := internalPod.FindContainerByName(desiredContainer.Name)
-		if internalContainer == nil {
-			glog.V(4).Infof("unik: container to sync: %v no longer found, creating a new one", desiredContainer)
+		if len(internalPod.Containers) < 1 {
+			glog.Infof("unik: container to sync: %v no longer found, creating a new one", desiredContainer)
 			if _, err := r.runPod(desiredPod); err != nil {
 				return errors.New("launching pod", err)
 			}
-			glog.V(4).Infof("unik: instance launched successfully", desiredContainer)
+			glog.Infof("unik: instance launched successfully", desiredContainer)
 			result.AddSyncResult(&kubecontainer.SyncResult{
 				Action: kubecontainer.StartContainer,
 				Target: desiredContainer.Name,
@@ -179,6 +181,7 @@ func (r *Runtime) SyncPod(desiredPod *api.Pod, desiredPodStatus api.PodStatus, i
 			return nil
 		}
 
+		internalContainer := internalPod.Containers[0]
 		state := internalContainer.State
 		if desiredPodStatus.ContainerStatuses[0].State.Running != nil {
 			state = kubecontainer.ContainerStateRunning
@@ -196,16 +199,9 @@ func (r *Runtime) SyncPod(desiredPod *api.Pod, desiredPodStatus api.PodStatus, i
 			return nil
 		}
 
-		desiredHash := hash(hashable{
-			state: state,
-			namespace: desiredPod.Namespace,
-			name: desiredPod.Name,
-			image: desiredContainer.Image,
-		})
-
-		syncNeeded := internalContainer.Hash != desiredHash
+		syncNeeded := internalContainer.State != state
 		if syncNeeded {
-			glog.V(4).Infof("sync needed: desired pod: %+v; desired hash: %v\ninternal pod: %+v, internal hash: %v", desiredPod, desiredHash, internalPod, internalContainer.Hash)
+			glog.Infof("sync needed: desired pod: %+v; internal pod: %+v", desiredPod, internalPod)
 			if err := r.KillPod(nil, internalPod, nil); err != nil {
 				return errors.New("deleting out-of-sync pod " + string(internalPod.ID), err)
 			}
@@ -218,7 +214,7 @@ func (r *Runtime) SyncPod(desiredPod *api.Pod, desiredPodStatus api.PodStatus, i
 			if err != nil {
 				return errors.New("launching pod", err)
 			}
-			glog.V(4).Infof("unik: instance launched successfully", desiredContainer)
+			glog.Infof("unik: instance launched successfully", desiredContainer)
 			result.AddSyncResult(&kubecontainer.SyncResult{
 				Action: kubecontainer.StartContainer,
 				Target: desiredContainer.Name,
@@ -230,7 +226,7 @@ func (r *Runtime) SyncPod(desiredPod *api.Pod, desiredPodStatus api.PodStatus, i
 
 			return nil
 		} else {
-			glog.V(4).Infof("no sync needed: for pod %+v", desiredPod)
+			glog.Infof("no sync needed: for pod %+v", desiredPod)
 		}
 		return nil
 	}(); err != nil {
@@ -248,7 +244,7 @@ func (r *Runtime) KillPod(_ *api.Pod, runningPod kubecontainer.Pod, gracePeriodO
 	if err != nil {
 		return errors.New("could not find instance " + instanceName, err)
 	}
-	if err := client.UnikClient(r.unikIp).Instances().Delete(instance.Id, true); err == nil {
+	if err := client.UnikClient(r.unikIp).Instances().Delete(instance.Id, true); err != nil {
 		return errors.New("deleting instance " + instance.Id, err)
 	}
 	r.mapLock.Lock()
@@ -288,7 +284,7 @@ func (r *Runtime) GetPodStatus(uid kubetypes.UID, name, namespace string) (*kube
 					Type: r.Type(),
 					ID: instance.Id,
 				},
-				Name: instance.Name,
+				Name: r.ownedContainers[instance.Id].Name,
 				State: state,
 				CreatedAt: instance.Created,
 				StartedAt: instance.Created,
@@ -429,18 +425,12 @@ func (r *Runtime) PortForward(pod *kubecontainer.Pod, port uint16, stream io.Rea
 
 func (r *Runtime) runPod(pod *api.Pod) (*types.Instance, error) {
 	container := pod.Spec.Containers[0]
-	instanceName := getInstanceName(pod.Namespace, pod.Name)
+	instanceName := getInstanceName(pod.Namespace, string(pod.ObjectMeta.UID))
 	imageName, _ := getImageInfo(container.Image)
 	//because we store the image name as Name:Infrastructure
-	mountPointsToVols := make(map[string]string)
-	for _, volumeMount := range container.VolumeMounts {
-		volId := volumeMount.Name
-		mountPoint := volumeMount.MountPath
-		mountPointsToVols[mountPoint] = volId
-	}
+
 	if len(container.VolumeMounts) > 0 {
-		glog.V(4).Infof("unik: warning: in unik runtime, volumeMount maps to volume.Id. mountPath maps to mountPoint")
-		glog.V(4).Infof("unik: kube VolumeMounts: %v translated to unik mountPoints: %v", mountPointsToVols)
+		glog.Infof("unik: warning: volumes being ignored")
 	}
 
 	env := make(map[string]string)
@@ -451,7 +441,7 @@ func (r *Runtime) runPod(pod *api.Pod) (*types.Instance, error) {
 	memoryMB := int(container.Resources.Requests.Memory().Value() >> 20)
 
 	//instanceName, imageName string, mountPointsToVols, env map[string]string, memoryMb int, noCleanup, debugMode
-	instance, err := client.UnikClient(r.unikIp).Instances().Run(instanceName, imageName, mountPointsToVols, env, memoryMB, false, false)
+	instance, err := client.UnikClient(r.unikIp).Instances().Run(instanceName, imageName, nil, env, memoryMB, false, false)
 	if err != nil {
 		podString := fmt.Sprintf("%+v", pod)
 		return nil, errors.New("running instance for pod spec " + podString, err)
@@ -459,6 +449,7 @@ func (r *Runtime) runPod(pod *api.Pod) (*types.Instance, error) {
 	r.mapLock.Lock()
 	defer r.mapLock.Unlock()
 	r.ownedInstances[instance.Id] = instance
+	r.ownedContainers[instance.Id] = container
 	r.podsToInstances[string(pod.UID)] = instance
 	return instance, nil
 }
@@ -497,7 +488,8 @@ func toContainerState(instanceState types.InstanceState) kubecontainer.Container
 	var state kubecontainer.ContainerState
 	switch instanceState {
 	case types.InstanceState_Pending:
-		state = kubecontainer.ContainerStateCreated
+		//state = kubecontainer.ContainerStateCreated
+		fallthrough
 	case types.InstanceState_Running:
 		state = kubecontainer.ContainerStateRunning
 	case types.InstanceState_Terminated:
@@ -514,7 +506,6 @@ func (r *Runtime) convertInstance(instance *types.Instance) *kubecontainer.Pod {
 	//instance name = namespace+"+"+name
 	split := strings.Split(instance.Name, "+")
 	if len(split) != 2 {
-		glog.V(4).Infof("%v doesn't belong to k8s, skipping", instance)
 		return nil
 	}
 	namespace := split[0]
@@ -528,14 +519,17 @@ func (r *Runtime) convertInstance(instance *types.Instance) *kubecontainer.Pod {
 		image: image,
 	}
 
+	r.mapLock.RLock()
+	defer r.mapLock.RUnlock()
 	//right now we are obeying a one vm - per - pod format; so no worries.
 	//one pod = one vm = one "container"
+
 	container := &kubecontainer.Container{
 		ID: kubecontainer.ContainerID{
 			Type: r.Type(),
 			ID: instance.Id,
 		},
-		Name: name,
+		Name: r.ownedContainers[instance.Id].Name,
 		//"tag" is infrastructure for now
 		Image: image,
 		ImageID: instance.ImageId,
@@ -545,7 +539,7 @@ func (r *Runtime) convertInstance(instance *types.Instance) *kubecontainer.Pod {
 	}
 
 	return &kubecontainer.Pod{
-		ID: kubetypes.UID(instance.Id),
+		ID: kubetypes.UID(name),
 		Name: name,
 		Namespace: namespace,
 		Containers: []*kubecontainer.Container{container},

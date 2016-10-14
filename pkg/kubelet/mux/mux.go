@@ -11,6 +11,7 @@ import (
 	"github.com/emc-advanced-dev/pkg/errors"
 	"strings"
 	"k8s.io/kubernetes/pkg/kubelet/unik"
+	"log"
 )
 
 var unikProviders = []string{
@@ -90,7 +91,9 @@ func (r *Runtime) GarbageCollect(gcPolicy kubecontainer.ContainerGCPolicy, allSo
 
 // Syncs the running pod into the desired pod.
 func (r *Runtime) SyncPod(desiredPod *api.Pod, desiredPodStatus api.PodStatus, internalPodStatus *kubecontainer.PodStatus, pullSecrets []api.Secret, backOff *flowcontrol.Backoff) (result kubecontainer.PodSyncResult) {
+	log.Printf("desired pod: %+v", desiredPod)
 	if isUnikPod(desiredPod.Namespace) {
+		log.Printf("desired pod is unik pod")
 		return r.unik.SyncPod(desiredPod, desiredPodStatus, internalPodStatus, pullSecrets, backOff)
 	}
 	return r.docker.SyncPod(desiredPod, desiredPodStatus, internalPodStatus, pullSecrets, backOff)

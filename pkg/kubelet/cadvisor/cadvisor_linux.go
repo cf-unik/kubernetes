@@ -190,6 +190,10 @@ func (cc *cadvisorClient) ImagesFsInfo() (cadvisorapiv2.FsInfo, error) {
 	var label string
 
 	switch cc.runtime {
+	case "mux":
+		fallthrough
+	case "Unik":
+		fallthrough
 	case "docker":
 		label = cadvisorfs.LabelDockerImages
 	case "rkt":
